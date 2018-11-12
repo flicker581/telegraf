@@ -18,10 +18,9 @@ var (
 )
 
 type Chrony struct {
-//	DNSLookup bool `toml:"dns_lookup"`
-	UseSudo bool `toml:"use_sudo"`
+	UseSudo         bool     `toml:"use_sudo"`
 	ChronycCommands []string `toml:"chronyc_commands"`
-	path      string
+	path            string
 }
 
 func (*Chrony) Description() string {
@@ -30,18 +29,29 @@ func (*Chrony) Description() string {
 
 func (*Chrony) SampleConfig() string {
 	return `
+  ## You need chronyc 2.4 or newer to use this input.
+  ##
   ## chronyc command list to run. Possible elements:
   ##  - tracking
   ##  - serverstats
   ##  - sources
   ##  - sourcestats
   ##  - ntpdata
+  ##  - rtcdata
+  ##  - clients
+  ##  - activity
+  ##  - smoothing
+  ##  NOTE: "clients" and "sources" must not go one after other, because they both return 10 elements.
+  #
   # chronyc_commands = ["tracking", "sources", "sourcestats"]
   # chronyc_commands = ["tracking", "sources", "sourcestats", "ntpdata", "serverstats"]
 
   ## chronyc requires root access to unix domain socket to perform some commands:
   ##  - serverstats
   ##  - ntpdata
+  ##  - rtcdata
+  ##  - clients
+  ##
   ## sudo must be configured to allow telegraf user to run chronyc as root to use this setting.
   # use_sudo = false
  
@@ -62,7 +72,7 @@ func (c *Chrony) Gather(acc telegraf.Accumulator) error {
 
 	argv = append(argv, "-c", "-m")
 	argv = append(argv, c.ChronycCommands...)
-	
+
 	cmd := execCommand(name, argv...)
 	out, err := internal.CombinedOutputTimeout(cmd, time.Second*5)
 	if err != nil {
@@ -84,8 +94,8 @@ type fieldCountError struct {
 	error
 }
 
-func parseSourcesLine(fields []string) (map[string]interface{}, map[string]string, error) {
-    //fmt.Printf("Input >>>%v<<<\n", fields)
+func parseSources(fields []string) (map[string]interface{}, map[string]string, error) {
+	//fmt.Printf("Input >>>%v<<<\n", fields)
 
 	var err error
 	var found bool
@@ -95,7 +105,7 @@ func parseSourcesLine(fields []string) (map[string]interface{}, map[string]strin
 	var offset, rawOffset, errorMargin float64
 
 	n := len(fields)
-	if ( n != 10) {
+	if n != 10 {
 		return nil, nil, fieldCountError{fmt.Errorf("Got %d instead of 10 fields in source line", n)}
 	}
 
@@ -117,51 +127,61 @@ func parseSourcesLine(fields []string) (map[string]interface{}, map[string]strin
 
 	for i, field := range fields {
 		switch i {
-		case 0: clockMode, found = modes[field]
-			if (!found) {
+		case 0:
+			clockMode, found = modes[field]
+			if !found {
 				err = fmt.Errorf("Unknown clock mode %s", field)
 			}
-		case 1: clockState, found = states[field]
-			if (!found) {
+		case 1:
+			clockState, found = states[field]
+			if !found {
 				err = fmt.Errorf("Unknown clock state %s", field)
 			}
-		case 2: clockRef = field
-		case 3: stratum, err = strconv.ParseInt(field, 10, 0)
-		case 4: poll, err = strconv.ParseInt(field, 10, 0)
-		case 5: reach, err = strconv.ParseInt(field, 8, 0)
-		case 6: lastRx, err = strconv.ParseInt(field, 10, 0)
-		case 7: offset, err = strconv.ParseFloat(field, 64)
-		case 8: rawOffset, err = strconv.ParseFloat(field, 64)
-		case 9: errorMargin, err = strconv.ParseFloat(field, 64)
+		case 2:
+			clockRef = field
+		case 3:
+			stratum, err = strconv.ParseInt(field, 10, 0)
+		case 4:
+			poll, err = strconv.ParseInt(field, 10, 0)
+		case 5:
+			reach, err = strconv.ParseInt(field, 8, 0)
+		case 6:
+			lastRx, err = strconv.ParseInt(field, 10, 0)
+		case 7:
+			offset, err = strconv.ParseFloat(field, 64)
+		case 8:
+			rawOffset, err = strconv.ParseFloat(field, 64)
+		case 9:
+			errorMargin, err = strconv.ParseFloat(field, 64)
 		}
-		if (err != nil) {
+		if err != nil {
 			return nil, nil, formatError{err}
 		}
 	}
 
 	tFields := map[string]interface{}{
-		"clockMode": clockMode,
-		"clockState": clockState,
-		"stratum": stratum,
-		"poll": poll,
-		"reach": reach,
-		"lastRx": lastRx,
-		"offset": offset,
-		"rawOffset": rawOffset,
+		"clockMode":   clockMode,
+		"clockState":  clockState,
+		"stratum":     stratum,
+		"poll":        poll,
+		"reach":       reach,
+		"lastRx":      lastRx,
+		"offset":      offset,
+		"rawOffset":   rawOffset,
 		"errorMargin": errorMargin,
 	}
 	tTags := map[string]string{
 		"command": "sources",
-		"clockId": clockRef, 
+		"clockId": clockRef,
 	}
 
-//	fmt.Printf("Source mode: %d, state: %d, ref: %s, stratum: %d, poll: %d, reach: %d, last rx: %d, offset: %e, raw offset: %e, error margin: %e\n", 
-//		clockMode, clockState, clockRef, stratum, poll, reach, lastRx, offset, rawOffset, errorMargin)
+	//	fmt.Printf("Source mode: %d, state: %d, ref: %s, stratum: %d, poll: %d, reach: %d, last rx: %d, offset: %e, raw offset: %e, error margin: %e\n",
+	//		clockMode, clockState, clockRef, stratum, poll, reach, lastRx, offset, rawOffset, errorMargin)
 	return tFields, tTags, nil
 }
 
-func parseSourceStatsLine(fields []string) (map[string]interface{}, map[string]string, error) {
-    //fmt.Printf("Input >>>%v<<<\n", fields)
+func parseSourceStats(fields []string) (map[string]interface{}, map[string]string, error) {
+	//fmt.Printf("Input >>>%v<<<\n", fields)
 
 	var err error
 	var clockRef string
@@ -169,47 +189,55 @@ func parseSourceStatsLine(fields []string) (map[string]interface{}, map[string]s
 	var frequency, freqSkew, offset, stdDev float64
 
 	n := len(fields)
-	if ( n != 8) {
+	if n != 8 {
 		return nil, nil, fieldCountError{fmt.Errorf("Got %d instead of 8 fields in sourcestats line", n)}
 	}
 
 	for i, field := range fields {
 		switch i {
-		case 0: clockRef = field
-		case 1: np, err = strconv.ParseInt(field, 10, 64)
-		case 2: nr, err = strconv.ParseInt(field, 10, 64)
-		case 3: span, err = strconv.ParseInt(field, 10, 64)
-		case 4: frequency, err = strconv.ParseFloat(field, 64)
-		case 5: freqSkew, err = strconv.ParseFloat(field, 64)
-		case 6: offset, err = strconv.ParseFloat(field, 64)
-		case 7: stdDev, err = strconv.ParseFloat(field, 64)
+		case 0:
+			clockRef = field
+		case 1:
+			np, err = strconv.ParseInt(field, 10, 64)
+		case 2:
+			nr, err = strconv.ParseInt(field, 10, 64)
+		case 3:
+			span, err = strconv.ParseInt(field, 10, 64)
+		case 4:
+			frequency, err = strconv.ParseFloat(field, 64)
+		case 5:
+			freqSkew, err = strconv.ParseFloat(field, 64)
+		case 6:
+			offset, err = strconv.ParseFloat(field, 64)
+		case 7:
+			stdDev, err = strconv.ParseFloat(field, 64)
 		}
-		if (err != nil) {
+		if err != nil {
 			return nil, nil, formatError{err}
 		}
 	}
 
 	tFields := map[string]interface{}{
-		"np": np,
-		"nr": nr,
-		"span": span,
+		"np":        np,
+		"nr":        nr,
+		"span":      span,
 		"frequency": frequency,
-		"freqSkew": freqSkew,
-		"offset": offset,
-		"stdDev": stdDev,
+		"freqSkew":  freqSkew,
+		"offset":    offset,
+		"stdDev":    stdDev,
 	}
 	tTags := map[string]string{
 		"command": "sourcestats",
 		"clockId": clockRef,
 	}
-	
-//	fmt.Printf("SourceStats ref: %s, np: %d, nr: %d, span: %d, frequency: %f, freqSkew: %f, offset: %e, stdDev: %e\n", 
-//		clockRef, np, nr, span, frequency, freqSkew, offset, stdDev)
+
+	//	fmt.Printf("SourceStats ref: %s, np: %d, nr: %d, span: %d, frequency: %f, freqSkew: %f, offset: %e, stdDev: %e\n",
+	//		clockRef, np, nr, span, frequency, freqSkew, offset, stdDev)
 	return tFields, tTags, nil
 }
 
 func parseNtpData(fields []string) (map[string]interface{}, map[string]string, error) {
-    //fmt.Printf("Input >>>%v<<<\n", fields)
+	//fmt.Printf("Input >>>%v<<<\n", fields)
 
 	var err error
 	var remoteAddress, remoteAddressHex, localAddress, localAddressHex string
@@ -223,111 +251,144 @@ func parseNtpData(fields []string) (map[string]interface{}, map[string]string, e
 	var totalTX, totalRX, totalValidRX int64
 
 	n := len(fields)
-	if ( n != 33) {
+	if n != 33 {
 		return nil, nil, fieldCountError{fmt.Errorf("Got %d instead of 33 fields in ntpdata line", n)}
 	}
 
 	for i, field := range fields {
 		switch i {
-		case 0: remoteAddress = field
-		case 1: remoteAddressHex = field
-		case 2: remotePort, err = strconv.ParseInt(field, 10, 64)
-		case 3: localAddress = field
-		case 4: localAddressHex = field
-		case 5: leapStatusStr = field
-		case 6: version, err = strconv.ParseInt(field, 10, 64)
-		case 7: clockModeStr = field
-		case 8: stratum, err = strconv.ParseInt(field, 10, 64)
-		case 9: pollInterval, err = strconv.ParseInt(field, 10, 64)
-		case 10: pollIntervalSec, err = strconv.ParseFloat(field, 64)
-		case 11: precision, err = strconv.ParseInt(field, 10, 64)
-		case 12: precisionSec, err = strconv.ParseFloat(field, 64)
-		case 13: rootDelay, err = strconv.ParseFloat(field, 64)
-		case 14: rootDispersion, err = strconv.ParseFloat(field, 64)
-		case 15: refIdHex = field
-		case 16: refId = field
-		case 17: refTime, err = strconv.ParseFloat(field, 64)
-		case 18: offset, err = strconv.ParseFloat(field, 64)
-		case 19: peerDelay, err = strconv.ParseFloat(field, 64)
-		case 20: peerDispersion, err = strconv.ParseFloat(field, 64)
-		case 21: responseTime, err = strconv.ParseFloat(field, 64)
-		case 22: jitterAsymmetry, err = strconv.ParseFloat(field, 64)
-		case 23: ntpTestsA = field
-		case 24: ntpTestsB = field
-		case 25: ntpTestsC = field
-		case 26: interleaved = field
-		case 27: authenticated = field
-		case 28: txTimestamping = field
-		case 29: rxTimestamping = field
-		case 30: totalTX, err = strconv.ParseInt(field, 10, 64)
-		case 31: totalRX, err = strconv.ParseInt(field, 10, 64)
-		case 32: totalValidRX, err = strconv.ParseInt(field, 10, 64)
+		case 0:
+			remoteAddress = field
+		case 1:
+			remoteAddressHex = field
+		case 2:
+			remotePort, err = strconv.ParseInt(field, 10, 64)
+		case 3:
+			localAddress = field
+		case 4:
+			localAddressHex = field
+		case 5:
+			leapStatusStr = field
+		case 6:
+			version, err = strconv.ParseInt(field, 10, 64)
+		case 7:
+			clockModeStr = field
+		case 8:
+			stratum, err = strconv.ParseInt(field, 10, 64)
+		case 9:
+			pollInterval, err = strconv.ParseInt(field, 10, 64)
+		case 10:
+			pollIntervalSec, err = strconv.ParseFloat(field, 64)
+		case 11:
+			precision, err = strconv.ParseInt(field, 10, 64)
+		case 12:
+			precisionSec, err = strconv.ParseFloat(field, 64)
+		case 13:
+			rootDelay, err = strconv.ParseFloat(field, 64)
+		case 14:
+			rootDispersion, err = strconv.ParseFloat(field, 64)
+		case 15:
+			refIdHex = field
+		case 16:
+			refId = field
+		case 17:
+			refTime, err = strconv.ParseFloat(field, 64)
+		case 18:
+			offset, err = strconv.ParseFloat(field, 64)
+		case 19:
+			peerDelay, err = strconv.ParseFloat(field, 64)
+		case 20:
+			peerDispersion, err = strconv.ParseFloat(field, 64)
+		case 21:
+			responseTime, err = strconv.ParseFloat(field, 64)
+		case 22:
+			jitterAsymmetry, err = strconv.ParseFloat(field, 64)
+		case 23:
+			ntpTestsA = field
+		case 24:
+			ntpTestsB = field
+		case 25:
+			ntpTestsC = field
+		case 26:
+			interleaved = field
+		case 27:
+			authenticated = field
+		case 28:
+			txTimestamping = field
+		case 29:
+			rxTimestamping = field
+		case 30:
+			totalTX, err = strconv.ParseInt(field, 10, 64)
+		case 31:
+			totalRX, err = strconv.ParseInt(field, 10, 64)
+		case 32:
+			totalValidRX, err = strconv.ParseInt(field, 10, 64)
 		}
-		if (err != nil) {
+		if err != nil {
 			return nil, nil, formatError{err}
 		}
 	}
 
 	tFields := map[string]interface{}{
-		"remoteAddress": remoteAddress,
+		"remoteAddress":    remoteAddress,
 		"remoteAddressHex": remoteAddressHex,
-		"remotePort": remotePort,
-		"localAddress": localAddress,
-		"localAddressHex": localAddressHex,
-		"leapStatus": leapStatusStr,
-		"version": version,
-		"clockModeStr": clockModeStr,
-		"stratum": stratum,
-		"pollInterval": pollInterval,
-		"pollIntervalSec": pollIntervalSec,
-		"precision": precision,
-		"precisionSec": precisionSec,
-		"rootDelay": rootDelay,
-		"rootDispersion": rootDispersion,
-		"refIdHex": refIdHex,
-		"refId": refId,
-		"refTime": refTime,
-		"offset": offset,
-		"peerDelay": peerDelay,
-		"peerDispersion": peerDispersion,
-		"responseTime": responseTime,
-		"jitterAsymmetry": jitterAsymmetry,
-		"ntpTestsA": ntpTestsA,
-		"ntpTestsB": ntpTestsB,
-		"ntpTestsC": ntpTestsC,
-		"interleaved": interleaved,
-		"authenticated": authenticated,
-		"txTimestamping": txTimestamping,
-		"rxTimestamping": rxTimestamping,
-		"totalTX": totalTX,
-		"totalRX": totalRX,
-		"totalValidRX": totalValidRX,
+		"remotePort":       remotePort,
+		"localAddress":     localAddress,
+		"localAddressHex":  localAddressHex,
+		"leapStatus":       leapStatusStr,
+		"version":          version,
+		"clockModeStr":     clockModeStr,
+		"stratum":          stratum,
+		"pollInterval":     pollInterval,
+		"pollIntervalSec":  pollIntervalSec,
+		"precision":        precision,
+		"precisionSec":     precisionSec,
+		"rootDelay":        rootDelay,
+		"rootDispersion":   rootDispersion,
+		"refIdHex":         refIdHex,
+		"refId":            refId,
+		"refTime":          refTime,
+		"offset":           offset,
+		"peerDelay":        peerDelay,
+		"peerDispersion":   peerDispersion,
+		"responseTime":     responseTime,
+		"jitterAsymmetry":  jitterAsymmetry,
+		"ntpTestsA":        ntpTestsA,
+		"ntpTestsB":        ntpTestsB,
+		"ntpTestsC":        ntpTestsC,
+		"interleaved":      interleaved,
+		"authenticated":    authenticated,
+		"txTimestamping":   txTimestamping,
+		"rxTimestamping":   rxTimestamping,
+		"totalTX":          totalTX,
+		"totalRX":          totalRX,
+		"totalValidRX":     totalValidRX,
 	}
 	tTags := map[string]string{
-		"command": "ntpdata",
-		"clockId": remoteAddress,
+		"command":    "ntpdata",
+		"clockId":    remoteAddress,
 		"clockIdHex": remoteAddressHex,
 	}
 
-//	fmt.Printf("NtpData remoteAddress: %s, remoteAddressHex: %s, remotePort: %d, localAddress: %s, localAddressHex: %s, leapStatusStr: %s, ", 
-//		remoteAddress, remoteAddressHex, remotePort, localAddress, localAddressHex, leapStatusStr)
-//	fmt.Printf("version: %d, clockMode: %s, stratum: %d, pollInterval: %d, pollIntervalSec: %f, precision: %d, precisionSec: %f, ",
-//		version, clockMode, stratum, pollInterval, pollIntervalSec, precision, precisionSec)
-//	fmt.Printf("rootDelay: %f, rootDispersion: %f, refIdHex: %s, refId: %s, refTime: %f, offset: %f, peerDelay: %f, peerDispersion: %f, ", 
-//		rootDelay, rootDispersion, refIdHex, refId, refTime, offset, peerDelay, peerDispersion)
-//	fmt.Printf("responseTime: %f, jitterAsymmetry: %f, ntpTestsA: %s, ntpTestsB: %s, ntpTestsC: %s, interleaved: %s, authenticated: %s, ",
-//		responseTime, jitterAsymmetry, ntpTestsA, ntpTestsB, ntpTestsC, interleaved, authenticated)
-//	fmt.Printf("txTimestamping: %s, rxTimestamping: %s, totalTX: %d, totalRX: %d, totalValidRX: %d\n", 
-//		txTimestamping, rxTimestamping, totalTX, totalRX, totalValidRX)
+	//	fmt.Printf("NtpData remoteAddress: %s, remoteAddressHex: %s, remotePort: %d, localAddress: %s, localAddressHex: %s, leapStatusStr: %s, ",
+	//		remoteAddress, remoteAddressHex, remotePort, localAddress, localAddressHex, leapStatusStr)
+	//	fmt.Printf("version: %d, clockMode: %s, stratum: %d, pollInterval: %d, pollIntervalSec: %f, precision: %d, precisionSec: %f, ",
+	//		version, clockMode, stratum, pollInterval, pollIntervalSec, precision, precisionSec)
+	//	fmt.Printf("rootDelay: %f, rootDispersion: %f, refIdHex: %s, refId: %s, refTime: %f, offset: %f, peerDelay: %f, peerDispersion: %f, ",
+	//		rootDelay, rootDispersion, refIdHex, refId, refTime, offset, peerDelay, peerDispersion)
+	//	fmt.Printf("responseTime: %f, jitterAsymmetry: %f, ntpTestsA: %s, ntpTestsB: %s, ntpTestsC: %s, interleaved: %s, authenticated: %s, ",
+	//		responseTime, jitterAsymmetry, ntpTestsA, ntpTestsB, ntpTestsC, interleaved, authenticated)
+	//	fmt.Printf("txTimestamping: %s, rxTimestamping: %s, totalTX: %d, totalRX: %d, totalValidRX: %d\n",
+	//		txTimestamping, rxTimestamping, totalTX, totalRX, totalValidRX)
 	return tFields, tTags, nil
 }
 
-func parseTrackingLine(fields []string) (map[string]interface{}, map[string]string, error) {
-    //fmt.Printf("Input >>>%v<<<\n", fields)
+func parseTracking(fields []string) (map[string]interface{}, map[string]string, error) {
+	//fmt.Printf("Input >>>%v<<<\n", fields)
 
 	var err error
 	n := len(fields)
-	if ( n != 14) {
+	if n != 14 {
 		return nil, nil, fieldCountError{fmt.Errorf("Got %d instead of 14 fields in tracking line", n)}
 	}
 	var refId, refIdHex, leapStatusStr string
@@ -336,79 +397,98 @@ func parseTrackingLine(fields []string) (map[string]interface{}, map[string]stri
 
 	for i, field := range fields {
 		switch i {
-		case 0: refIdHex = field
-		case 1: refId = field
-		case 2: stratum, err = strconv.ParseInt(field, 10, 0)
-		case 3: refTime, err = strconv.ParseFloat(field, 64)
-		case 4: systemTime, err = strconv.ParseFloat(field, 64)
-		case 5: lastOffset, err = strconv.ParseFloat(field, 64)
-		case 6: rMSOffset, err = strconv.ParseFloat(field, 64)
-		case 7: frequency, err = strconv.ParseFloat(field, 64)
-		case 8: freqResidual, err = strconv.ParseFloat(field, 64)
-		case 9: freqSkew, err = strconv.ParseFloat(field, 64)
-		case 10: rootDelay, err = strconv.ParseFloat(field, 64)
-		case 11: rootDispersion, err = strconv.ParseFloat(field, 64)
-		case 12: updateInterval, err = strconv.ParseFloat(field, 64)
-		case 13: leapStatusStr = field
+		case 0:
+			refIdHex = field
+		case 1:
+			refId = field
+		case 2:
+			stratum, err = strconv.ParseInt(field, 10, 0)
+		case 3:
+			refTime, err = strconv.ParseFloat(field, 64)
+		case 4:
+			systemTime, err = strconv.ParseFloat(field, 64)
+		case 5:
+			lastOffset, err = strconv.ParseFloat(field, 64)
+		case 6:
+			rMSOffset, err = strconv.ParseFloat(field, 64)
+		case 7:
+			frequency, err = strconv.ParseFloat(field, 64)
+		case 8:
+			freqResidual, err = strconv.ParseFloat(field, 64)
+		case 9:
+			freqSkew, err = strconv.ParseFloat(field, 64)
+		case 10:
+			rootDelay, err = strconv.ParseFloat(field, 64)
+		case 11:
+			rootDispersion, err = strconv.ParseFloat(field, 64)
+		case 12:
+			updateInterval, err = strconv.ParseFloat(field, 64)
+		case 13:
+			leapStatusStr = field
 		}
-		if (err != nil) {
+		if err != nil {
 			return nil, nil, formatError{err}
 		}
 	}
 
 	tFields := map[string]interface{}{
-		"refId": refId,
-		"refIdHex": refIdHex,
-		"stratum": stratum,
-		"refTime": refTime,
+		"refId":            refId,
+		"refIdHex":         refIdHex,
+		"stratum":          stratum,
+		"refTime":          refTime,
 		"systemTimeOffset": systemTime,
-		"lastOffset": lastOffset,
-		"rmsOffset": rMSOffset,
-		"frequency": frequency,
-		"freqResidual": freqResidual,
-		"freqSkew": freqSkew,
-		"rootDelay": rootDelay,
-		"rootDispersion": rootDispersion,
-		"updateInterval": updateInterval,
-		"leapStatus": leapStatusStr,
+		"lastOffset":       lastOffset,
+		"rmsOffset":        rMSOffset,
+		"frequency":        frequency,
+		"freqResidual":     freqResidual,
+		"freqSkew":         freqSkew,
+		"rootDelay":        rootDelay,
+		"rootDispersion":   rootDispersion,
+		"updateInterval":   updateInterval,
+		"leapStatus":       leapStatusStr,
 	}
 	tTags := map[string]string{
 		"command": "tracking",
 		"clockId": "chrony",
 	}
-//	fmt.Printf("Tracking refIdHex: %s, refId: %s, stratum: %d, refTime: %f, systemTime: %f, lastOffset: %f, rMSOffset: %f, frequency: %f, freqResidual: %f, freqSkew: %f, rootDelay: %f, rootDispersion: %f, updateInterval: %f, leapStatus: %s\n",
-//		refIdHex, refId, stratum, refTime, systemTime, lastOffset, rMSOffset, frequency, freqResidual, freqSkew, rootDelay, rootDispersion, updateInterval, leapStatusStr)
+	//	fmt.Printf("Tracking refIdHex: %s, refId: %s, stratum: %d, refTime: %f, systemTime: %f, lastOffset: %f, rMSOffset: %f, frequency: %f, freqResidual: %f, freqSkew: %f, rootDelay: %f, rootDispersion: %f, updateInterval: %f, leapStatus: %s\n",
+	//		refIdHex, refId, stratum, refTime, systemTime, lastOffset, rMSOffset, frequency, freqResidual, freqSkew, rootDelay, rootDispersion, updateInterval, leapStatusStr)
 	return tFields, tTags, nil
 }
 
-func parseServerStatsLine(fields []string) (map[string]interface{}, map[string]string, error) {
-    //fmt.Printf("Input >>>%v<<<\n", fields)
+func parseServerStats(fields []string) (map[string]interface{}, map[string]string, error) {
+	//fmt.Printf("Input >>>%v<<<\n", fields)
 
 	var err error
 	n := len(fields)
-	if ( n != 5) {
+	if n != 5 {
 		return nil, nil, fieldCountError{fmt.Errorf("Got %d instead of 5 fields in serverstats line", n)}
 	}
 	var ntpPacketsReceived, ntpPacketsDropped, commandPacketsReceived, commandPacketsDropped, clientLogRecordsDropped int64
 
 	for i, field := range fields {
 		switch i {
-		case 0: ntpPacketsReceived, err = strconv.ParseInt(field, 10, 64)
-		case 1: ntpPacketsDropped, err = strconv.ParseInt(field, 10, 64)
-		case 2: commandPacketsReceived, err = strconv.ParseInt(field, 10, 64)
-		case 3: commandPacketsDropped, err = strconv.ParseInt(field, 10, 64)
-		case 4: clientLogRecordsDropped, err = strconv.ParseInt(field, 10, 64)
+		case 0:
+			ntpPacketsReceived, err = strconv.ParseInt(field, 10, 64)
+		case 1:
+			ntpPacketsDropped, err = strconv.ParseInt(field, 10, 64)
+		case 2:
+			commandPacketsReceived, err = strconv.ParseInt(field, 10, 64)
+		case 3:
+			commandPacketsDropped, err = strconv.ParseInt(field, 10, 64)
+		case 4:
+			clientLogRecordsDropped, err = strconv.ParseInt(field, 10, 64)
 		}
-		if (err != nil) {
+		if err != nil {
 			return nil, nil, formatError{err}
 		}
 	}
 
 	tFields := map[string]interface{}{
-		"ntpPacketsReceived": ntpPacketsReceived,
-		"ntpPacketsDropped": ntpPacketsDropped,
-		"commandPacketsReceived": commandPacketsReceived,
-		"commandPacketsDropped": commandPacketsDropped,
+		"ntpPacketsReceived":      ntpPacketsReceived,
+		"ntpPacketsDropped":       ntpPacketsDropped,
+		"commandPacketsReceived":  commandPacketsReceived,
+		"commandPacketsDropped":   commandPacketsDropped,
 		"clientLogRecordsDropped": clientLogRecordsDropped,
 	}
 	tTags := map[string]string{
@@ -416,8 +496,219 @@ func parseServerStatsLine(fields []string) (map[string]interface{}, map[string]s
 		"clockId": "chrony",
 	}
 
-//	fmt.Printf("ServerStats ntpPacketsReceived: %d, ntpPacketsDropped: %d, commandPacketsReceived: %d, commandPacketsDropped: %d, clientLogRecordsDropped: %d\n",
-//		ntpPacketsReceived, ntpPacketsDropped, commandPacketsReceived, commandPacketsDropped, clientLogRecordsDropped)
+	//	fmt.Printf("ServerStats ntpPacketsReceived: %d, ntpPacketsDropped: %d, commandPacketsReceived: %d, commandPacketsDropped: %d, clientLogRecordsDropped: %d\n",
+	//		ntpPacketsReceived, ntpPacketsDropped, commandPacketsReceived, commandPacketsDropped, clientLogRecordsDropped)
+	return tFields, tTags, nil
+}
+
+func parseRtcData(fields []string) (map[string]interface{}, map[string]string, error) {
+	//fmt.Printf("Input >>>%v<<<\n", fields)
+
+	var err error
+	n := len(fields)
+	if n != 6 {
+		return nil, nil, fieldCountError{fmt.Errorf("Got %d instead of 6 fields in rtcdata line", n)}
+	}
+	var rtcSamples, rtcRuns, rtcSampleSpan int64
+	var rtcRefTime, rtcOffset, rtcFreq float64
+
+	for i, field := range fields {
+		switch i {
+		case 0:
+			rtcRefTime, err = strconv.ParseFloat(field, 64)
+		case 1:
+			rtcSamples, err = strconv.ParseInt(field, 10, 64)
+		case 2:
+			rtcRuns, err = strconv.ParseInt(field, 10, 64)
+		case 3:
+			rtcSampleSpan, err = strconv.ParseInt(field, 10, 64)
+		case 4:
+			rtcOffset, err = strconv.ParseFloat(field, 64)
+		case 5:
+			rtcFreq, err = strconv.ParseFloat(field, 64)
+		}
+		if err != nil {
+			return nil, nil, formatError{err}
+		}
+	}
+
+	tFields := map[string]interface{}{
+		"rtcRefTime":    rtcRefTime,
+		"rtcSamples":    rtcSamples,
+		"rtcRuns":       rtcRuns,
+		"rtcSampleSpan": rtcSampleSpan,
+		"rtcOffset":     rtcOffset,
+		"rtcFreq":       rtcFreq,
+	}
+	tTags := map[string]string{
+		"command": "rtcdata",
+		"clockId": "chrony",
+	}
+
+	return tFields, tTags, nil
+}
+
+func parseClients(fields []string) (map[string]interface{}, map[string]string, error) {
+	//fmt.Printf("Input >>>%v<<<\n", fields)
+
+	var err error
+	var clientAddress string
+	var ntpRequests, ntpDropped, ntpInterval, ntpIntervalLimited, ntpLastRequest int64
+	var cmdRequests, cmdDropped, cmdInterval, cmdLastRequest int64
+
+	n := len(fields)
+	if n != 10 {
+		return nil, nil, fieldCountError{fmt.Errorf("Got %d instead of 10 fields in clients line", n)}
+	}
+
+	for i, field := range fields {
+		switch i {
+		case 0:
+			clientAddress = field
+		case 1:
+			ntpRequests, err = strconv.ParseInt(field, 10, 64)
+		case 2:
+			ntpDropped, err = strconv.ParseInt(field, 10, 64)
+		case 3:
+			ntpInterval, err = strconv.ParseInt(field, 10, 64)
+		case 4:
+			ntpIntervalLimited, err = strconv.ParseInt(field, 10, 64)
+		case 5:
+			ntpLastRequest, err = strconv.ParseInt(field, 10, 64)
+		case 6:
+			cmdRequests, err = strconv.ParseInt(field, 10, 64)
+		case 7:
+			cmdDropped, err = strconv.ParseInt(field, 10, 64)
+		case 8:
+			cmdInterval, err = strconv.ParseInt(field, 10, 64)
+		case 9:
+			cmdLastRequest, err = strconv.ParseInt(field, 10, 64)
+		}
+		if err != nil {
+			return nil, nil, formatError{err}
+		}
+	}
+
+	tFields := map[string]interface{}{
+		"ntpRequests": ntpRequests,
+		"ntpDropped":  ntpDropped,
+		"cmdRequests": cmdRequests,
+		"cmdDropped":  cmdDropped,
+	}
+	if ntpInterval != 127 {
+		tFields["ntpInterval"] = ntpInterval
+	}
+	if ntpIntervalLimited != 127 {
+		tFields["ntpIntervalLimited"] = ntpIntervalLimited
+	}
+	if ntpLastRequest != 4294967295 {
+		tFields["ntpLastRequest"] = ntpLastRequest
+	}
+	if cmdInterval != 127 {
+		tFields["cmdInterval"] = cmdInterval
+	}
+	if cmdLastRequest != 4294967295 {
+		tFields["cmdLastRequest"] = cmdLastRequest
+	}
+
+	tTags := map[string]string{
+		"command":       "clients",
+		"clientAddress": clientAddress,
+	}
+
+	return tFields, tTags, nil
+}
+
+func parseActivity(fields []string) (map[string]interface{}, map[string]string, error) {
+	//fmt.Printf("Input >>>%v<<<\n", fields)
+
+	var err error
+	n := len(fields)
+	if n != 5 {
+		return nil, nil, fieldCountError{fmt.Errorf("Got %d instead of 5 fields in activity line", n)}
+	}
+	var sourcesOnline, sourcesOffline, sourcesBurstToOnline, sourcesBurstToOffline, sourcesUnknownAddress int64
+
+	for i, field := range fields {
+		switch i {
+		case 0:
+			sourcesOnline, err = strconv.ParseInt(field, 10, 64)
+		case 1:
+			sourcesOffline, err = strconv.ParseInt(field, 10, 64)
+		case 2:
+			sourcesBurstToOnline, err = strconv.ParseInt(field, 10, 64)
+		case 3:
+			sourcesBurstToOffline, err = strconv.ParseInt(field, 10, 64)
+		case 4:
+			sourcesUnknownAddress, err = strconv.ParseInt(field, 10, 64)
+		}
+		if err != nil {
+			return nil, nil, formatError{err}
+		}
+	}
+
+	tFields := map[string]interface{}{
+		"sourcesOnline":         sourcesOnline,
+		"sourcesOffline":        sourcesOffline,
+		"sourcesBurstToOnline":  sourcesBurstToOnline,
+		"sourcesBurstToOffline": sourcesBurstToOffline,
+		"sourcesUnknownAddress": sourcesUnknownAddress,
+	}
+	tTags := map[string]string{
+		"command": "activity",
+		"clockId": "chrony",
+	}
+
+	return tFields, tTags, nil
+}
+
+func parseSmoothing(fields []string) (map[string]interface{}, map[string]string, error) {
+	//fmt.Printf("Input >>>%v<<<\n", fields)
+
+	var err error
+	n := len(fields)
+	if n != 7 {
+		return nil, nil, fieldCountError{fmt.Errorf("Got %d instead of 7 fields in smoothing line", n)}
+	}
+	var smoothingActive, smoothingLeapOnly bool
+	var smoothingOffset, smoothingFreq, smoothingFreqWander, smoothingLastUpdate, smoothingRemainingTime float64
+
+	for i, field := range fields {
+		switch i {
+		case 0:
+			smoothingActive = (field != "No")
+		case 1:
+			smoothingLeapOnly = (field != "")
+		case 2:
+			smoothingOffset, err = strconv.ParseFloat(field, 64)
+		case 3:
+			smoothingFreq, err = strconv.ParseFloat(field, 64)
+		case 4:
+			smoothingFreqWander, err = strconv.ParseFloat(field, 64)
+		case 5:
+			smoothingLastUpdate, err = strconv.ParseFloat(field, 64)
+		case 6:
+			smoothingRemainingTime, err = strconv.ParseFloat(field, 64)
+		}
+		if err != nil {
+			return nil, nil, formatError{err}
+		}
+	}
+
+	tFields := map[string]interface{}{
+		"smoothingActive":        smoothingActive,
+		"smoothingLeapOnly":      smoothingLeapOnly,
+		"smoothingOffset":        smoothingOffset,
+		"smoothingFreq":          smoothingFreq,
+		"smoothingFreqWander":    smoothingFreqWander,
+		"smoothingLastUpdate":    smoothingLastUpdate,
+		"smoothingRemainingTime": smoothingRemainingTime,
+	}
+	tTags := map[string]string{
+		"command": "smoothing",
+		"clockId": "chrony",
+	}
+
 	return tFields, tTags, nil
 }
 
@@ -425,24 +716,30 @@ func parseChronycOutput(cmds []string, out string, acc telegraf.Accumulator) err
 
 	var tFields map[string]interface{}
 	var tTags map[string]string
-	
+
 	singleLine := map[string]bool{
-		"tracking": true,
+		"tracking":    true,
 		"serverstats": true,
-		"sources": false,
+		"sources":     false,
 		"sourcestats": false,
-		"ntpdata": false,
+		"ntpdata":     false,
+		"rtcdata":     true,
+		"clients":     false,
+		"activity":    true,
+		"smoothing":   true,
 	}
 
 	var cmd string
 
+	//	fmt.Printf("Got cmds:\n%#v\n output:\n%#v\n", cmds, out)
+
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	Lines: 
+Lines:
 	for len(lines) > 0 {
 		line := lines[0]
-		
+
 		var err error
-		Cmd:
+	Cmd:
 		for {
 			if cmd == "" {
 				if len(cmds) == 0 {
@@ -459,13 +756,26 @@ func parseChronycOutput(cmds []string, out string, acc telegraf.Accumulator) err
 			err = nil
 			// process the line with given cmd
 			switch cmd {
-				case "tracking": tFields, tTags, err = parseTrackingLine(fields)
-				case "serverstats": tFields, tTags, err = parseServerStatsLine(fields)
-				case "sources": tFields, tTags, err = parseSourcesLine(fields)
-				case "sourcestats": tFields, tTags, err = parseSourceStatsLine(fields)
-				case "ntpdata": tFields, tTags, err = parseNtpData(fields)
-				default:
-					return fmt.Errorf("Unknown cmd '%s'", cmd)
+			case "tracking":
+				tFields, tTags, err = parseTracking(fields)
+			case "serverstats":
+				tFields, tTags, err = parseServerStats(fields)
+			case "sources":
+				tFields, tTags, err = parseSources(fields)
+			case "sourcestats":
+				tFields, tTags, err = parseSourceStats(fields)
+			case "ntpdata":
+				tFields, tTags, err = parseNtpData(fields)
+			case "rtcdata":
+				tFields, tTags, err = parseRtcData(fields)
+			case "clients":
+				tFields, tTags, err = parseClients(fields)
+			case "activity":
+				tFields, tTags, err = parseActivity(fields)
+			case "smoothing":
+				tFields, tTags, err = parseSmoothing(fields)
+			default:
+				return fmt.Errorf("Unknown cmd '%s'", cmd)
 			}
 			switch err.(type) {
 			case nil:
@@ -491,12 +801,12 @@ func parseChronycOutput(cmds []string, out string, acc telegraf.Accumulator) err
 	}
 
 	if cmd == "" && len(cmds) == 0 && len(lines) > 0 {
-		return fmt.Errorf("Commands done, but there is more output: %v\n", lines)
+		return fmt.Errorf("Commands done, but there is more output: %#v\n", lines)
 	}
 	if len(lines) == 0 {
 		for i, cmd := range cmds {
 			if singleLine[cmd] {
-				return fmt.Errorf("Not enough output for remaining commands: %v\n", cmds[i:])
+				return fmt.Errorf("Not enough output for remaining commands: %#v\n", cmds[i:])
 			}
 		}
 	}

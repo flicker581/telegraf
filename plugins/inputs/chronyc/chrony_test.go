@@ -18,41 +18,51 @@ func TestGather(t *testing.T) {
 	defer func() { execCommand = exec.Command }()
 	var acc testutil.Accumulator
 
+	c.ChronycCommands = []string{"tracking", "serverstats"}
 	err := c.Gather(&acc)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	tags := map[string]string{
-		"reference_id": "192.168.1.22",
-		"leap_status":  "not synchronized",
-		"stratum":      "3",
+		"command": "tracking",
+		"clockId": "chrony",
 	}
 	fields := map[string]interface{}{
-		"system_time":     0.000020390,
-		"last_offset":     0.000012651,
-		"rms_offset":      0.000025577,
-		"frequency":       -16.001,
-		"residual_freq":   0.0,
-		"skew":            0.006,
-		"root_delay":      0.001655,
-		"root_dispersion": 0.003307,
-		"update_interval": 507.2,
+		"refId":            "PPS",
+		"refIdHex":         "50505300",
+		"stratum":          int64(1),
+		"refTime":          1541793798.895264285,
+		"systemTimeOffset": -0.000001007,
+		"lastOffset":       0.000000291,
+		"rmsOffset":        0.000000239,
+		"frequency":        -17.957,
+		"freqResidual":     0.000,
+		"freqSkew":         0.005,
+		"rootDelay":        0.000001000,
+		"rootDispersion":   0.000010123,
+		"updateInterval":   16.0,
+		"leapStatus":       "Normal",
 	}
 
-	acc.AssertContainsTaggedFields(t, "chrony", fields, tags)
+	acc.AssertContainsTaggedFields(t, "chronyc", fields, tags)
 
-	// test with dns lookup
-	c.DNSLookup = true
-	err = c.Gather(&acc)
-	if err != nil {
-		t.Fatal(err)
+	fields = map[string]interface{}{
+		"ntpPacketsReceived":      int64(191),
+		"ntpPacketsDropped":       int64(222),
+		"commandPacketsReceived":  int64(183),
+		"commandPacketsDropped":   int64(111),
+		"clientLogRecordsDropped": int64(231),
 	}
-	acc.AssertContainsTaggedFields(t, "chrony", fields, tags)
+	tags = map[string]string{
+		"command": "serverstats",
+		"clockId": "chrony",
+	}
+	acc.AssertContainsTaggedFields(t, "chronyc", fields, tags)
 
 }
 
-// fackeExecCommand is a helper function that mock
+// fakeExecCommand is a helper function that mock
 // the exec.Command call (and call the test binary)
 func fakeExecCommand(command string, args ...string) *exec.Cmd {
 	cs := []string{"-test.run=TestHelperProcess", "--", command}
@@ -71,38 +81,37 @@ func TestHelperProcess(t *testing.T) {
 		return
 	}
 
-	lookup := "Reference ID    : 192.168.1.22 (ntp.example.com)\n"
-	noLookup := "Reference ID    : 192.168.1.22 (192.168.1.22)\n"
-	mockData := `Stratum         : 3
-Ref time (UTC)  : Thu May 12 14:27:07 2016
-System time     : 0.000020390 seconds fast of NTP time
-Last offset     : +0.000012651 seconds
-RMS offset      : 0.000025577 seconds
-Frequency       : 16.001 ppm slow
-Residual freq   : -0.000 ppm
-Skew            : 0.006 ppm
-Root delay      : 0.001655 seconds
-Root dispersion : 0.003307 seconds
-Update interval : 507.2 seconds
-Leap status     : Not synchronized
+	trackingOut := `50505300,PPS,1,1541793798.895264285,-0.000001007,0.000000291,0.000000239,-17.957,0.000,0.005,0.000001000,0.000010123,16.0,Normal
+`
+	serverstatsOut := `191,222,183,111,231
 `
 
 	args := os.Args
 
 	// Previous arguments are tests stuff, that looks like :
 	// /tmp/go-build970079519/…/_test/integration.test -test.run=TestHelperProcess --
+
 	cmd, args := args[3], args[4:]
 
-	if cmd == "chronyc" {
-		if args[0] == "tracking" {
-			fmt.Fprint(os.Stdout, lookup+mockData)
-		} else {
-			fmt.Fprint(os.Stdout, noLookup+mockData)
-		}
-	} else {
+	if cmd != "chronyc" {
 		fmt.Fprint(os.Stdout, "command not found")
 		os.Exit(1)
+	}
 
+	if args[0] != "-c" || args[1] != "-m" {
+		fmt.Println("First arguments shall be -c -m")
+		os.Exit(1)
+	}
+	for _, command := range args[2:] {
+		switch command {
+		case "tracking":
+			fmt.Fprint(os.Stdout, trackingOut)
+		case "serverstats":
+			fmt.Fprint(os.Stdout, serverstatsOut)
+		default:
+			fmt.Printf("Unknown chronyc command %q\n", command)
+			os.Exit(1)
+		}
 	}
 	os.Exit(0)
 }
