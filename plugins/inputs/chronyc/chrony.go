@@ -3,6 +3,7 @@ package chronyc
 import (
 	"errors"
 	"fmt"
+	//	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -14,13 +15,14 @@ import (
 )
 
 var (
-	execCommand = exec.Command // execCommand is used to mock commands in tests.
+	ExecCommand = exec.Command // execCommand is used to mock commands in tests.
 )
 
 type Chrony struct {
 	UseSudo         bool     `toml:"use_sudo"`
 	ChronycCommands []string `toml:"chronyc_commands"`
-	path            string
+	ClientsSummary  bool     `toml:"clients_summary"`
+	ChronycPath     string   `toml:"chronyc_path"`
 }
 
 func (*Chrony) Description() string {
@@ -29,8 +31,12 @@ func (*Chrony) Description() string {
 
 func (*Chrony) SampleConfig() string {
 	return `
-  ## You need chronyc 2.4 or newer to use this input.
-  ##
+  ## You need chronyc 2.4 or newer to use this input. 
+  ## Invokes "chronyc -c <command>" for each command in the list, collecting everything in output.
+
+  ## Path to chronyc executable, if you need to use specific one.
+  # chronyc_path = "/usr/bin/chronyc"
+  
   ## chronyc command list to run. Possible elements:
   ##  - tracking
   ##  - serverstats
@@ -41,7 +47,6 @@ func (*Chrony) SampleConfig() string {
   ##  - clients
   ##  - activity
   ##  - smoothing
-  ##  NOTE: "clients" and "sources" must not go one after other, because they both return 10 elements.
   #
   # chronyc_commands = ["tracking", "sources", "sourcestats"]
   # chronyc_commands = ["tracking", "sources", "sourcestats", "ntpdata", "serverstats"]
@@ -54,31 +59,66 @@ func (*Chrony) SampleConfig() string {
   ##
   ## sudo must be configured to allow telegraf user to run chronyc as root to use this setting.
   # use_sudo = false
- 
-  `
+
+  ## "clients" command may report too many metrics, one line per client host. 
+  ## When the following option is True, only summary metric is added to the result.
+  # clients_summary = false
+`
 }
 
 func (c *Chrony) Gather(acc telegraf.Accumulator) error {
-	if len(c.path) == 0 {
+	if len(c.ChronycPath) == 0 {
 		return errors.New("chronyc not found: verify that chrony is installed and that chronyc is in your PATH")
 	}
 
-	name := c.path
+	name := c.ChronycPath
 	argv := []string{}
 	if c.UseSudo {
 		name = "sudo"
-		argv = append(argv, "-n", c.path)
+		argv = append(argv, "-n", c.ChronycPath)
+	}
+
+	argv = append(argv, "-c")
+	for _, command := range c.ChronycCommands {
+		//		fmt.Fprintf(os.Stderr, "sending command: %s\n", command)
+		argvCmd := append(argv, command)
+		cmd := ExecCommand(name, argvCmd...)
+		out, err := internal.CombinedOutputTimeout(cmd, time.Second*5)
+		if err != nil {
+			return fmt.Errorf("failed to run command %s: %s - %s", strings.Join(cmd.Args, " "), err, string(out))
+		}
+		//		fmt.Fprintf(os.Stderr, "Got output: %s\n", out)
+		err = c.parseChronycOutput([]string{command}, string(out), acc)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (c *Chrony) MultiGather(acc telegraf.Accumulator) error {
+	if len(c.ChronycPath) == 0 {
+		return errors.New("chronyc not found: verify that chrony is installed and that chronyc is in your PATH")
+	}
+
+	name := c.ChronycPath
+	argv := []string{}
+	if c.UseSudo {
+		name = "sudo"
+		argv = append(argv, "-n", c.ChronycPath)
 	}
 
 	argv = append(argv, "-c", "-m")
 	argv = append(argv, c.ChronycCommands...)
 
-	cmd := execCommand(name, argv...)
+	cmd := ExecCommand(name, argv...)
 	out, err := internal.CombinedOutputTimeout(cmd, time.Second*5)
 	if err != nil {
 		return fmt.Errorf("failed to run command %s: %s - %s", strings.Join(cmd.Args, " "), err, string(out))
 	}
-	err = parseChronycOutput(c.ChronycCommands, string(out), acc)
+	//fmt.Fprintf(os.Stderr, "Got output: %s\n", out)
+	err = c.parseChronycOutput(c.ChronycCommands, string(out), acc)
 	if err != nil {
 		return err
 	}
@@ -130,12 +170,12 @@ func parseSources(fields []string) (map[string]interface{}, map[string]string, e
 		case 0:
 			clockMode, found = modes[field]
 			if !found {
-				err = fmt.Errorf("Unknown clock mode %s", field)
+				err = fmt.Errorf("Unknown clock mode %q", field)
 			}
 		case 1:
 			clockState, found = states[field]
 			if !found {
-				err = fmt.Errorf("Unknown clock state %s", field)
+				err = fmt.Errorf("Unknown clock state %q", field)
 			}
 		case 2:
 			clockRef = field
@@ -160,16 +200,19 @@ func parseSources(fields []string) (map[string]interface{}, map[string]string, e
 	}
 
 	tFields := map[string]interface{}{
-		"clockMode":   clockMode,
-		"clockState":  clockState,
-		"stratum":     stratum,
-		"poll":        poll,
-		"reach":       reach,
-		"lastRx":      lastRx,
-		"offset":      offset,
-		"rawOffset":   rawOffset,
-		"errorMargin": errorMargin,
+		"clockMode":  clockMode,
+		"clockState": clockState,
+		"poll":       poll,
+		"reach":      reach,
 	}
+	if lastRx != 4294967295 {
+		tFields["stratum"] = stratum
+		tFields["lastRx"] = lastRx
+		tFields["offset"] = offset
+		tFields["rawOffset"] = rawOffset
+		tFields["errorMargin"] = errorMargin
+	}
+
 	tTags := map[string]string{
 		"command": "sources",
 		"clockId": clockRef,
@@ -327,6 +370,10 @@ func parseNtpData(fields []string) (map[string]interface{}, map[string]string, e
 		if err != nil {
 			return nil, nil, formatError{err}
 		}
+	}
+
+	if remoteAddress == "[UNSPEC]" {
+		return nil, nil, nil
 	}
 
 	tFields := map[string]interface{}{
@@ -548,7 +595,14 @@ func parseRtcData(fields []string) (map[string]interface{}, map[string]string, e
 	return tFields, tTags, nil
 }
 
-func parseClients(fields []string) (map[string]interface{}, map[string]string, error) {
+type clients struct {
+	summaryOnly      bool
+	totalClients     int64
+	ntpClients       int64
+	activeNtpClients int64
+}
+
+func (cl *clients) parseClients(fields []string) (map[string]interface{}, map[string]string, error) {
 	//fmt.Printf("Input >>>%v<<<\n", fields)
 
 	var err error
@@ -589,6 +643,10 @@ func parseClients(fields []string) (map[string]interface{}, map[string]string, e
 		}
 	}
 
+	cl.totalClients += 1
+	if ntpRequests != 0 {
+		cl.ntpClients += 1
+	}
 	tFields := map[string]interface{}{
 		"ntpRequests": ntpRequests,
 		"ntpDropped":  ntpDropped,
@@ -603,6 +661,9 @@ func parseClients(fields []string) (map[string]interface{}, map[string]string, e
 	}
 	if ntpLastRequest != 4294967295 {
 		tFields["ntpLastRequest"] = ntpLastRequest
+		if ntpLastRequest <= 3600 {
+			cl.activeNtpClients += 1
+		}
 	}
 	if cmdInterval != 127 {
 		tFields["cmdInterval"] = cmdInterval
@@ -616,6 +677,23 @@ func parseClients(fields []string) (map[string]interface{}, map[string]string, e
 		"clientAddress": clientAddress,
 	}
 
+	if cl.summaryOnly {
+		return nil, nil, nil
+	}
+	return tFields, tTags, nil
+}
+
+func (cl *clients) summarizeClients() (map[string]interface{}, map[string]string, error) {
+
+	tFields := map[string]interface{}{
+		"totalClients":     cl.totalClients,
+		"ntpClients":       cl.ntpClients,
+		"activeNtpClients": cl.activeNtpClients,
+	}
+
+	tTags := map[string]string{
+		"command": "clients",
+	}
 	return tFields, tTags, nil
 }
 
@@ -712,101 +790,127 @@ func parseSmoothing(fields []string) (map[string]interface{}, map[string]string,
 	return tFields, tTags, nil
 }
 
-func parseChronycOutput(cmds []string, out string, acc telegraf.Accumulator) error {
+// This function can potentially parse output from multiple commands,
+// but there is a problem: whenever field count in two successive commands is the same,
+// there is no solid way to differentiate between them.
+func (c *Chrony) parseChronycOutput(commandList []string, out string, acc telegraf.Accumulator) error {
 
 	var tFields map[string]interface{}
 	var tTags map[string]string
 
-	singleLine := map[string]bool{
-		"tracking":    true,
-		"serverstats": true,
-		"sources":     false,
-		"sourcestats": false,
-		"ntpdata":     false,
-		"rtcdata":     true,
-		"clients":     false,
-		"activity":    true,
-		"smoothing":   true,
+	type commandRef struct {
+		// A singleline command returns exactly 1 line of output.
+		// All other commands return 0 or more lines.
+		singleLine bool
+		// field count in the output
+		fields int
+		// parser function
+		lineParser func(fields []string) (map[string]interface{}, map[string]string, error)
+		// summarizing function
+		summary func() (map[string]interface{}, map[string]string, error)
 	}
 
-	var cmd string
+	cl := clients{
+		summaryOnly: c.ClientsSummary,
+	}
+	command := map[string]*commandRef{
+		"tracking":    {true, 14, parseTracking, nil},
+		"serverstats": {true, 5, parseServerStats, nil},
+		"sources":     {false, 10, parseSources, nil},
+		"sourcestats": {false, 8, parseSourceStats, nil},
+		"ntpdata":     {false, 33, parseNtpData, nil},
+		"rtcdata":     {true, 6, parseRtcData, nil},
+		"clients":     {false, 10, cl.parseClients, cl.summarizeClients},
+		"activity":    {true, 5, parseActivity, nil},
+		"smoothing":   {true, 7, parseSmoothing, nil},
+	}
 
-	//	fmt.Printf("Got cmds:\n%#v\n output:\n%#v\n", cmds, out)
+	var cmd *commandRef
+	var commandName string
 
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-Lines:
-	for len(lines) > 0 {
-		line := lines[0]
+	lineDone := -1
+	cmdList := commandList
+
+	for currentLine, line := range lines {
+
+		fields := strings.Split(line, ",")
+		// empty line maps to zero fields
+		if line == "" {
+			fields = []string{}
+		}
 
 		var err error
-	Cmd:
+	LoopCmd:
 		for {
-			if cmd == "" {
-				if len(cmds) == 0 {
-					break Lines
+			if cmd == nil {
+				if len(cmdList) == 0 {
+					return fmt.Errorf("Commands done, but there is more output: %#v\n", lines[lineDone+1:])
 				}
-				cmd = cmds[0]
-				if singleLine[cmd] {
-					// Next line will belong to the next command
-					cmds = cmds[1:]
+				commandName = cmdList[0]
+				var found bool
+				cmd, found = command[commandName]
+				if !found {
+					return fmt.Errorf("Unknown command '%s'", commandName)
 				}
 			}
-			//fmt.Printf("Processing command %s\n", cmd)
-			fields := strings.Split(line, ",")
 			err = nil
-			// process the line with given cmd
-			switch cmd {
-			case "tracking":
-				tFields, tTags, err = parseTracking(fields)
-			case "serverstats":
-				tFields, tTags, err = parseServerStats(fields)
-			case "sources":
-				tFields, tTags, err = parseSources(fields)
-			case "sourcestats":
-				tFields, tTags, err = parseSourceStats(fields)
-			case "ntpdata":
-				tFields, tTags, err = parseNtpData(fields)
-			case "rtcdata":
-				tFields, tTags, err = parseRtcData(fields)
-			case "clients":
-				tFields, tTags, err = parseClients(fields)
-			case "activity":
-				tFields, tTags, err = parseActivity(fields)
-			case "smoothing":
-				tFields, tTags, err = parseSmoothing(fields)
-			default:
-				return fmt.Errorf("Unknown cmd '%s'", cmd)
-			}
-			switch err.(type) {
-			case nil:
-				acc.AddFields("chronyc", tFields, tTags)
-				if singleLine[cmd] {
-					// done with it, what's next
-					cmd = ""
-				}
-				break Cmd
-			case fieldCountError:
-				if singleLine[cmd] {
-					return fmt.Errorf("Wrong field count for mandatory command '%s'", cmd)
+			// When got wrong number of fields in output,
+			// this may mean that it is time to switch to next command.
+			if len(fields) != cmd.fields {
+				if cmd.singleLine {
+					return fmt.Errorf("Wrong field count for mandatory command '%s': %d, must be %d",
+						commandName, len(fields), cmd.fields)
 				} else {
 					// try next command
-					cmd = ""
-					cmds = cmds[1:]
+					cmd = nil
+					cmdList = cmdList[1:]
+					continue LoopCmd
 				}
-			default:
-				fmt.Printf("Something wrong: %s", err)
 			}
+			// process the line with current cmd
+			tFields, tTags, err = cmd.lineParser(fields)
+			if err != nil {
+				return err
+			}
+			if tFields != nil || tTags != nil {
+				acc.AddFields("chronyc", tFields, tTags)
+			}
+			if cmd.singleLine {
+				// done with it, what's next
+				cmd = nil
+				// Next line will belong to the next command
+				cmdList = cmdList[1:]
+			}
+			break LoopCmd
 		}
-		lines = lines[1:]
+		lineDone = currentLine
 	}
 
-	if cmd == "" && len(cmds) == 0 && len(lines) > 0 {
-		return fmt.Errorf("Commands done, but there is more output: %#v\n", lines)
+	if len(lines) == lineDone+1 {
+		for _, cmdName := range cmdList {
+			cmd, found := command[cmdName]
+			if !found {
+				return fmt.Errorf("Unknown cmd '%s'", cmdName)
+			}
+			if cmd.singleLine {
+				return fmt.Errorf("Not enough output for the command: %s\n", cmdName)
+			}
+		}
 	}
-	if len(lines) == 0 {
-		for i, cmd := range cmds {
-			if singleLine[cmd] {
-				return fmt.Errorf("Not enough output for remaining commands: %#v\n", cmds[i:])
+
+	// Add summary metrics for each of processed commands
+	for _, commandName := range commandList {
+		//fmt.Printf("Debug summary for command %s\n", commandName)
+		cmd, found := command[commandName]
+		if found && cmd.summary != nil {
+			//fmt.Printf("Execute summary for command %s\n", commandName)
+			tFields, tTags, err := cmd.summary()
+			if err != nil {
+				return err
+			}
+			if tFields != nil || tTags != nil {
+				acc.AddFields("chronyc", tFields, tTags)
 			}
 		}
 	}
@@ -819,7 +923,7 @@ func init() {
 	}
 	path, _ := exec.LookPath("chronyc")
 	if len(path) > 0 {
-		c.path = path
+		c.ChronycPath = path
 	}
 	inputs.Add("chronyc", func() telegraf.Input {
 		return &c
