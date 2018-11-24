@@ -49,7 +49,6 @@ func (*Chrony) SampleConfig() string {
   ##  - smoothing
   #
   # chronyc_commands = ["tracking", "sources", "sourcestats"]
-  # chronyc_commands = ["tracking", "sources", "sourcestats", "ntpdata", "serverstats"]
 
   ## chronyc requires root access to unix domain socket to perform some commands:
   ##  - serverstats
